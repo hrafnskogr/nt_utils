@@ -1,0 +1,9 @@
+[package]
+name = "nt_utils"
+version = "0.1.0"
+authors = ["hrafnskogr <hrafnskogr@pm.me>"]
+edition = "2021"
+repository = "https://github.com/hrafnskogr/nt_utils"
+readme = "README.md"
+
+[dependencies]
