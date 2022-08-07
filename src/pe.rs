@@ -36,10 +36,12 @@ pub struct PEImage
 {
     pub base_addr: usize,
     name: PEName,
-    name_init: bool,
     optional_header_offset: u32,
     export_directory_offset: u32,
     export_directory_addr: usize,
+    exp_dir_base: usize,
+    fnames: Vec<String>,
+    fnames_ordinals: Vec<usize>,
 }
 
 impl PEImage
@@ -53,10 +55,12 @@ impl PEImage
     {
         let mut pe = PEImage { base_addr,
                                name,
-                               name_init: false,
                                optional_header_offset: 0,
                                export_directory_offset: 0,
                                export_directory_addr: 0,
+                               exp_dir_base: 0,
+                               fnames: Vec::new(),
+                               fnames_ordinals: Vec::new(),
                              };
         unsafe
         {
@@ -83,6 +87,22 @@ impl PEImage
         
         // Compute a final absolute address to the export directory
         self.export_directory_addr = self.base_addr + self.export_directory_offset as usize;
+
+        // Ordinal Base:
+        self.exp_dir_base = *((self.export_directory_addr + 0x10) as *const u8) as usize;
+
+        // Populate the array of function names
+        for idx in 0..self.number_of_names()
+        {
+            self.fnames.push(self.fname_from_index(idx as usize)); 
+        }
+
+        // Populate the array of ordinals
+        
+        for idx in 0..self.number_of_names()
+        {
+            self.fnames_ordinals.push(self.ford_from_index(idx as usize) + self.exp_dir_base);
+        }
 
         // TODO: Replace by a match to handle the PEName::Is(x) case
         if self.export_directory_offset != 0x0 && self.name == PEName::Empty
@@ -175,46 +195,91 @@ impl PEImage
         *((self.export_directory_addr + 0x24) as *const u32) as usize
     }
 
-    // List the first 3 bytes of all functions
-    // Quite use less right now
-    pub unsafe fn list_all_func(&self)
+    pub fn syscall_from_name(&self, fname: &str) -> usize
     {
-        //let mut index = 0;
-        let mut ord = 1;
-
-        for _ in 0..(self.number_of_names())
+        let idx = self.idx_from_name(fname);
+        if idx < 0
         {
-            //let name_addr = self.base_addr
-            //            + *((self.base_addr + self.addr_of_names() + index) as *const u32) as usize;
-            //let (name, _) = read_until_null(name_addr as usize);
+            panic!("Can't find index for {}", fname);
+        }
 
-            let addr = *((self.base_addr + self.funcs_addr() + (ord * 4) ) as *const u32);
-            println!("{:x?}", *((self.base_addr + addr as usize) as *const [u8;3]));
+        let idx = idx as usize;
 
-            ord += 1;
-            //index += 4;
+        let ord = self.fnames_ordinals[idx];
+        let faddr = self.faddr_from_ord(ord);
+
+        unsafe
+        {
+            crate::memory::read_mem::<u8>(faddr + 4, 1, 1).stub[0] as usize
         }
     }
 
-    pub fn fname_from_ord(&self, ord: usize) -> String
+    pub fn fname_from_index(&self, index: usize) -> String
     {
         let name_addr: usize;
 
         unsafe
         {
-        name_addr = self.base_addr
-                        + *((self.base_addr + self.names_offset() + (ord * 4)) as *const u32) as usize;
+            name_addr = self.base_addr
+                        + *((self.base_addr + self.names_offset() 
+                        + (index * 4)) as *const u32) as usize;
         }
+
         let (name, _) = read_null!(name_addr as usize, u8);
-        let name = String::from_utf8(name).unwrap();
+        let name = String::from_utf8_lossy(&name).to_string(); //.unwrap();
 
         name
-        
     }
 
-    pub unsafe fn faddr_from_ord(&self, ord: usize) -> usize
+    pub fn ford_from_index(&self, index: usize) -> usize
     {
-        self.base_addr + *((self.base_addr + self.funcs_offset() + (ord * 4) ) as *const u32) as usize
+        let size = 2;
+        let ret: usize;
+
+        unsafe
+        {
+            let ord_addr = self.base_addr + self.ordinals_offset(); 
+            let ord = crate::memory::read_mem::<u8>(ord_addr + size * index, size, 1);
+            ret = u16::from_le_bytes(ord.stub.try_into().expect("failed conversion")) as usize; 
+        }
+
+        ret
+    }
+    
+    pub fn faddr_from_ord(&self, ord: usize) -> usize
+    {
+            let rva = self.rva_from_ord(ord);
+
+            (self.base_addr + rva) as usize
+    }
+
+    // TODO: handle proper error instead of -1
+    pub fn idx_from_name(&self, fname: &str) -> isize
+    {
+        let mut idx: isize = 0;
+
+        for name in &self.fnames
+        {
+            if name == fname
+            {
+                return idx;
+            }
+
+            idx += 1;
+        }
+
+        -1
+    }
+
+    pub fn rva_from_ord(&self, ord: usize) -> usize
+    {
+        unsafe
+        {
+            *((self.base_addr 
+               + self.funcs_offset() 
+               + ((ord - self.exp_dir_base) * 4)) 
+               as *const u32) as usize
+        }
     }
 
     pub unsafe fn funcs_addr(&self) -> usize
@@ -222,6 +287,7 @@ impl PEImage
         self.base_addr +  self.funcs_offset() as usize
     }
 
+    // TODO: Rewrite
     pub unsafe fn find_func_addr(&self, find: &str) -> (usize, usize)
     {
         let mut ord = 1;
@@ -229,7 +295,7 @@ impl PEImage
         // Compute ordinal for given function
         for _ in 0..(self.number_of_names())
         {
-            let name = self.fname_from_ord(ord);
+            let name = self.fname_from_index(ord);
             
             let found = String::from(name);
             let looking_for = String::from(find);
@@ -257,13 +323,13 @@ impl PEImage
 /// Enable easy iteration over functions / addresses....
 impl<'a> IntoIterator for &'a PEImage
 {
-    type Item = usize;
+    type Item = (usize, usize);
     type IntoIter = PEImageIntoIterator<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         PEImageIntoIterator {
             pe: self,
-            current_ord: 0,
+            ord_idx: 0,
         }
     }
 }
@@ -271,26 +337,25 @@ impl<'a> IntoIterator for &'a PEImage
 pub struct PEImageIntoIterator<'a>
 {
     pe: &'a PEImage,
-    current_ord: usize,
+    ord_idx: usize,
 }
 
 impl<'a> Iterator for PEImageIntoIterator<'a>
 {
-    type Item= usize;
+    type Item = (usize, usize);
 
     fn next(&mut self) -> Option<Self::Item> 
     {
-        unsafe
+        if self.ord_idx == (self.pe.fnames_ordinals.len())
         {
-            if self.current_ord > (self.pe.number_of_func() as usize)
-            {
-                return None
-            }
+            return None
         }
 
-        self.current_ord += 1;
+        let ord = self.ord_idx;
 
-        Some(self.current_ord - 1)
+        self.ord_idx += 1;
+
+        Some((self.pe.fnames_ordinals[ord], ord))
     }
 }
 

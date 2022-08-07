@@ -127,6 +127,33 @@ impl LdrModule
         LdrModule::get_module(self.base_addr, self.offset)
     }
 
+    pub fn find_module(&self, mod_name: &str) -> Result<Module, PEErr>
+    {
+        for m in &self.modules
+        {
+            if m.name == mod_name
+            {
+                return Ok(m.clone())
+            }
+        }
+
+        Err( PEErr 
+             { 
+                status: ErrState::Failure, 
+                message: String::from("nope") 
+             } )
+
+        /*
+        match self.modules.iter().next().filter(|&m| {println!("pipo"); &m.name == mod_name})
+        {
+            Some(x) => return Ok(x.clone()),
+            None => return Err( PEErr { status: ErrState::Failure, message: String::from("nope") } ),
+        }
+        */
+        
+        //self.modules.iter().filter(|&m| m.name == mod_name).collect::<Module>() 
+    }
+
     fn get_module(addr: usize, offset: usize) -> Result<Module, PEErr>
     {
         Ok( Module 
