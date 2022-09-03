@@ -13,14 +13,15 @@ impl Peb
 {
     pub fn new() -> Peb
     {
+
+        let peb_addr: usize;
         unsafe
         {
-            let peb_addr: usize;
             asm!("xor rax, rax",               // put rax to 0
                  "mov r8, gs:[rax + 0x60]",    // load peb addr into rbx
                 out("r8") peb_addr);
-            Peb { base_addr: peb_addr }
         }
+        Peb { base_addr: peb_addr }
     }
 
     pub fn get_ldr(&self) -> Ldr
